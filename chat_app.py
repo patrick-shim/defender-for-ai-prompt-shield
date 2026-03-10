@@ -98,6 +98,49 @@ def extract_content_filter_details(error: Exception) -> dict:
     }
 
 
+def map_layer_label(layer: Optional[str]) -> str:
+    layer_map = {
+        "LAYER_1_APP_POLICY": "app",
+        "LAYER_1.5_AI_FOUNDRY_SAFETY": "azure_ai",
+        "LAYER_2_BEHAVIORAL": "app",
+        "LAYER_3_OPENAI": "azure_openai",
+    }
+    return layer_map.get(layer, "unknown")
+
+
+def build_compact_result(outcome: dict) -> dict:
+    layer = outcome.get("blocked_by")
+    reason = None
+
+    if outcome.get("status") == "blocked":
+        filter_summary = outcome.get("filter_summary") or []
+        behavioral_pattern = outcome.get("behavioral_pattern")
+        assistant_response = outcome.get("assistant_response")
+
+        if filter_summary:
+            reason = ", ".join(filter_summary)
+        elif behavioral_pattern:
+            reason = behavioral_pattern
+        elif assistant_response:
+            reason = assistant_response
+    elif outcome.get("status") == "error":
+        reason = outcome.get("error") or outcome.get("assistant_response")
+    else:
+        reason = "Allowed"
+
+    confidence = outcome.get("confidence")
+    if confidence is None:
+        confidence = outcome.get("risk_score_after", 0.0)
+
+    return {
+        "prompt_id": outcome.get("prompt_index"),
+        "result": "blocked" if outcome.get("status") == "blocked" else "allowed",
+        "layer": map_layer_label(layer),
+        "reason": reason,
+        "confidence": round(float(confidence), 2),
+    }
+
+
 def log_event(event: str, ctx: SecurityContext, details: dict, layer: str = None) -> None:
     """
     Structured audit logging with layer detection.
@@ -552,18 +595,20 @@ def run_test_prompts(
 ) -> None:
     prompts_path = os.getenv("TEST_PROMPTS_FILE", "test_prompts.json")
     results_path = os.getenv("TEST_RESULTS_FILE", "results.json")
+    verbose_results_path = os.getenv("TEST_VERBOSE_RESULTS_FILE", "results_verbose.json")
     delay_seconds = int(os.getenv("TEST_PROMPT_DELAY_SECONDS", "5"))
 
     with open(prompts_path, "r", encoding="utf-8") as f:
         prompts = json.load(f)
 
     results = []
+    verbose_results = []
     total = len(prompts)
     print(f"Running {total} test prompts from {prompts_path}.\n")
 
     for index, item in enumerate(prompts, start=1):
         prompt_index = item.get("prompt_index", str(index - 1))
-        prompt_text = item.get("prompt", "")
+        prompt_text = item.get("prompt") or item.get("prompt_texts", "")
         expected_result = item.get("expected_result")
 
         print(f"[{index}/{total}] Prompt {prompt_index}")
@@ -581,7 +626,8 @@ def run_test_prompts(
         outcome["prompt_index"] = prompt_index
         outcome["expected_result"] = expected_result
         outcome["timestamp"] = utc_now()
-        results.append(outcome)
+        verbose_results.append(outcome)
+        results.append(build_compact_result(outcome))
 
         if index < total:
             time.sleep(delay_seconds)
@@ -589,7 +635,11 @@ def run_test_prompts(
     with open(results_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
-    print(f"Saved {len(results)} results to {results_path}.\n")
+    with open(verbose_results_path, "w", encoding="utf-8") as f:
+        json.dump(verbose_results, f, ensure_ascii=False, indent=2)
+
+    print(f"Saved {len(results)} compact results to {results_path}.")
+    print(f"Saved {len(verbose_results)} verbose results to {verbose_results_path}.\n")
 
 
 # -----------------------------
