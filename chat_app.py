@@ -1,6 +1,9 @@
 import os
+import ast
 import json
 import requests
+import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -47,6 +50,54 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_bool_flag(name: str, default: bool = False) -> bool:
+    prefix = f"--{name}="
+    for arg in sys.argv[1:]:
+        if arg.startswith(prefix):
+            value = arg[len(prefix):].strip().lower()
+            return value in {"1", "true", "yes", "on"}
+    env_value = os.getenv(name.upper().replace("-", "_"))
+    if env_value is None:
+        return default
+    return env_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def extract_content_filter_details(error: Exception) -> dict:
+    text = str(error)
+    marker = " - "
+    payload = None
+    if marker in text:
+        payload_text = text.split(marker, 1)[1]
+        try:
+            payload = ast.literal_eval(payload_text)
+        except (ValueError, SyntaxError):
+            payload = None
+
+    inner = (
+        payload.get("error", {}).get("innererror", {})
+        if isinstance(payload, dict) else {}
+    )
+    content_filter_result = inner.get("content_filter_result", {})
+    summary = []
+
+    for category, info in content_filter_result.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("filtered"):
+            severity = info.get("severity")
+            detected = info.get("detected")
+            if severity is not None:
+                summary.append(f"{category}:{severity}")
+            elif detected is not None:
+                summary.append(f"{category}:detected")
+
+    return {
+        "raw_error": text,
+        "content_filter_result": content_filter_result,
+        "filter_summary": summary,
+    }
+
+
 def log_event(event: str, ctx: SecurityContext, details: dict, layer: str = None) -> None:
     """
     Structured audit logging with layer detection.
@@ -67,11 +118,60 @@ def log_event(event: str, ctx: SecurityContext, details: dict, layer: str = None
         "details": details,
     }
     
-    # Enhanced readable output for console
-    layer_str = f"[{layer}]" if layer else "[APP]"
-    risk_color = "🔴" if ctx.risk_score >= 0.7 else "🟡" if ctx.risk_score >= 0.35 else "🟢"
+    # Check if verbose logging is enabled
+    verbose_logging = os.getenv("VERBOSE_LOGGING", "false").lower() == "true"
+    origin_map = {
+        "APP_INIT": "APP",
+        "APP_CLEANUP": "APP",
+        "APP_TERMINATION": "APP",
+        "LAYER_1_APP_POLICY": "APP",
+        "LAYER_1.5_AI_FOUNDRY_SAFETY": "AZURE",
+        "LAYER_2_BEHAVIORAL": "APP",
+        "LAYER_3_OPENAI": "MODEL",
+    }
+    origin = origin_map.get(layer, "APP")
     
-    print(f"{layer_str} {risk_color} {event}: {json.dumps(record, ensure_ascii=False)}")
+    if verbose_logging:
+        # Original detailed JSON output for debugging
+        layer_str = f"[{layer}]" if layer else "[APP]"
+        risk_color = "🔴" if ctx.risk_score >= 0.7 else "🟡" if ctx.risk_score >= 0.35 else "🟢"
+        print(f"{layer_str} [{origin}] {risk_color} {event}: {json.dumps(record, ensure_ascii=False)}")
+    else:
+        # Clean, structured output format
+        layer_str = f"[{layer}]" if layer else "[APP]"
+        risk_color = "🔴" if ctx.risk_score >= 0.7 else "🟡" if ctx.risk_score >= 0.35 else "🟢"
+        
+        print(f"{layer_str} [{origin}] {risk_color} {event}")
+        
+        # Show key details in a readable format
+        if details:
+            if "error" in details:
+                print(f"    ❌ Error: {details['error']}")
+            elif "filter_summary" in details and details["filter_summary"]:
+                print(f"    🚫 Filter reason: {', '.join(details['filter_summary'])}")
+            elif "categories" in details:
+                print(f"    🚫 Blocked categories: {', '.join(details['categories'])}")
+                if "severity_scores" in details:
+                    scores = details['severity_scores']
+                    print(f"    📊 Severity scores: {', '.join([f'{k}:{v}' for k, v in scores.items() if v > 0])}")
+            
+            elif "attack_detected" in details:
+                if details["attack_detected"]:
+                    print(f"    🛡️  Jailbreak attack detected")
+                else:
+                    print(f"    ✅ No jailbreak detected")
+            
+            elif "len" in details:
+                print(f"    📝 Length: {details['len']} chars")
+            elif "pattern" in details:
+                print(f"    🔍 Pattern: {details['pattern']}")
+            elif "reason" in details:
+                print(f"    📋 Reason: {details['reason']}")
+            
+            # Show risk score changes
+            if "risk_score_after" in details:
+                print(f"    ⚠️  Risk score: {details['risk_score_after']:.3f}")
+    
     return record
 
 
@@ -118,6 +218,7 @@ RISK_WEIGHTS = {
     "prompt_blocked_by_policy":         0.10,
     "prompt_blocked_by_content_filter": 0.25,   # Azure OpenAI confirmed bad signal
     "prompt_shield_blocked":            0.40,   # Prompt Shields confirmed jailbreak
+    "high_severity_content":            0.30,   # High severity content detected
     "credential_probe":                 0.30,
     "behavioral_pattern_detected":      0.20,
 }
@@ -136,62 +237,58 @@ def update_risk_score(ctx: SecurityContext, event: str) -> None:
 
 
 # -----------------------------
-# Prompt Shields via REST API (Layer 1.5) — logs to MDC
-# SDK v1.0.0 does not support ShieldPromptOptions so we call REST directly.
+# AI Foundry Content Safety Integration (Layer 1.5)
 # -----------------------------
-def shield_prompt(
+def analyze_with_ai_foundry_filters(
     user_text: str,
     ctx: SecurityContext,
-    credential: DefaultAzureCredential
-) -> Optional[str]:
+    client: AzureOpenAI,
+    deployment: str
+) -> Optional[dict]:
     """
-    Call Azure AI Content Safety Prompt Shields REST API directly.
-    Detects jailbreak and prompt injection attempts.
-    Signals from this API are logged to Microsoft Defender for Cloud.
-    Returns a refusal string if an attack is detected, otherwise None.
+    Use AI Foundry's built-in content filter signal as a pre-check.
+    - If request succeeds, treat as safe.
+    - If platform content filter blocks, treat as unsafe.
     """
-    cs_endpoint = require_env("AZURE_CONTENT_SAFETY_ENDPOINT").rstrip("/")
-    url = f"{cs_endpoint}/contentsafety/text:shieldPrompt?api-version=2024-09-01"
-
     try:
-        token = credential.get_token("https://cognitiveservices.azure.com/.default").token
-
-        resp = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "userPrompt": user_text,
-                "documents": []
-            },
-            timeout=10,
+        # Trigger platform-side filtering using a lightweight request.
+        client.chat.completions.create(
+            model=deployment,
+            messages=[
+                {"role": "system", "content": "Safety pre-check."},
+                {"role": "user", "content": user_text}
+            ],
+            temperature=1,
+            max_completion_tokens=10
         )
-        resp.raise_for_status()
-        result = resp.json()
 
-        attack_detected = result.get("userPromptAnalysis", {}).get("attackDetected", False)
+        log_event("ai_foundry_content_analyzed", ctx, {
+            "text_length": len(user_text)
+        }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
 
-        log_event("prompt_shield_scanned", ctx, {
-            "attack_detected": attack_detected,
-            "raw": result,
-        }, layer="LAYER_1.5_PROMPT_SHIELDS")
-
-        if attack_detected:
-            ctx.jailbreak_attempts += 1
-            update_risk_score(ctx, "prompt_shield_blocked")
-            log_event("prompt_shield_blocked", ctx, {
-                "risk_score_after": ctx.risk_score,
-                "session_risk_after": ctx.session_risk,
-            }, layer="LAYER_1.5_PROMPT_SHIELDS")
-            return "Request blocked: prompt injection or jailbreak attempt detected."
-
+        return {"result": "ALLOWED", "safe": True}
+        
+    except BadRequestError as e:
+        if "content_filter" in str(e):
+            # Content was blocked by AI Foundry's built-in filters.
+            filter_info = extract_content_filter_details(e)
+            log_event("ai_foundry_content_blocked", ctx, {
+                "filter_summary": filter_info["filter_summary"],
+                "filter_reason": str(e),
+                "text_length": len(user_text)
+            }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+            return {
+                "result": "BLOCKED",
+                "safe": False,
+                "reason": str(e),
+                "filter_summary": filter_info["filter_summary"],
+                "filter_details": filter_info["content_filter_result"],
+            }
+        else:
+            raise
     except Exception as e:
-        # Don't crash the app if Content Safety is unavailable — log and continue
-        log_event("prompt_shield_error", ctx, {"error": str(e)}, layer="LAYER_1.5_PROMPT_SHIELDS")
-
-    return None
+        log_event("ai_foundry_safety_error", ctx, {"error": str(e)}, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+        return None
 
 
 # -----------------------------
@@ -299,6 +396,202 @@ def check_terminate(ctx: SecurityContext) -> bool:
     return False
 
 
+def process_user_text(
+    user_text: str,
+    ctx: SecurityContext,
+    client: AzureOpenAI,
+    deployment: str,
+    messages: list[dict],
+    enforce_termination: bool = True,
+    app_layer_enabled: bool = True
+) -> dict:
+    ctx.turn_count += 1
+
+    result = {
+        "prompt": user_text,
+        "turn": ctx.turn_count,
+        "status": "completed",
+        "blocked_by": None,
+        "assistant_response": None,
+        "risk_score_before": round(ctx.risk_score, 3),
+        "risk_score_after": round(ctx.risk_score, 3),
+        "session_risk_after": ctx.session_risk,
+    }
+
+    if app_layer_enabled:
+        blocked = apply_security_policy(user_text, ctx)
+        if blocked:
+            ctx.blocked_count += 1
+            update_risk_score(ctx, "prompt_blocked_by_policy")
+            log_event("prompt_blocked_by_policy", ctx, {
+                "reason": blocked,
+                "risk_score_after": ctx.risk_score,
+            }, layer="LAYER_1_APP_POLICY")
+            print(f"Assistant: {blocked}\n")
+            result["status"] = "blocked"
+            result["blocked_by"] = "LAYER_1_APP_POLICY"
+            result["assistant_response"] = blocked
+            result["risk_score_after"] = round(ctx.risk_score, 3)
+            result["session_risk_after"] = ctx.session_risk
+            result["terminated"] = check_terminate(ctx) if enforce_termination else False
+            return result
+
+    safety_analysis = analyze_with_ai_foundry_filters(user_text, ctx, client, deployment)
+    if safety_analysis and not safety_analysis["safe"]:
+        ctx.blocked_count += 1
+        update_risk_score(ctx, "high_severity_content")
+        if safety_analysis["result"] == "BLOCKED":
+            log_event("ai_foundry_content_blocked", ctx, {
+                "filter_summary": safety_analysis.get("filter_summary", []),
+                "reason": safety_analysis.get("reason", "Content filter triggered"),
+                "risk_score_after": ctx.risk_score,
+            }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+            message = "[Content blocked by AI Foundry safety filters]"
+            print(f"Assistant: {message}\n")
+            result["blocked_by"] = "LAYER_1.5_AI_FOUNDRY_SAFETY"
+        
+        else:
+            log_event("ai_foundry_unsafe_content", ctx, {
+                "analysis_result": safety_analysis["result"],
+                "risk_score_after": ctx.risk_score,
+            }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+            message = "[Content flagged as potentially unsafe]"
+            print(f"Assistant: {message}\n")
+            result["blocked_by"] = "LAYER_1.5_AI_FOUNDRY_SAFETY"
+        result["status"] = "blocked"
+        result["assistant_response"] = message
+        result["filter_summary"] = safety_analysis.get("filter_summary", [])
+        result["filter_details"] = safety_analysis.get("filter_details", {})
+        result["risk_score_after"] = round(ctx.risk_score, 3)
+        result["session_risk_after"] = ctx.session_risk
+        result["terminated"] = check_terminate(ctx) if enforce_termination else False
+        return result
+
+    if app_layer_enabled:
+        pattern_block = detect_behavioral_pattern(ctx, messages)
+        if pattern_block:
+            ctx.blocked_count += 1
+            log_event("behavioral_pattern_blocked", ctx, {
+                "pattern": pattern_block,
+                "risk_score_after": ctx.risk_score,
+            }, layer="LAYER_2_BEHAVIORAL")
+            print("Assistant: [Suspicious pattern detected. Session flagged.]\n")
+            result["behavioral_pattern"] = pattern_block
+
+    messages.append({"role": "user", "content": user_text})
+    log_event("prompt_sent", ctx, {
+        "len": len(user_text),
+        "current_risk_score": ctx.risk_score,
+        "session_risk": ctx.session_risk,
+    }, layer="LAYER_3_OPENAI")
+
+    try:
+        resp = client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            temperature=1,
+        )
+    except BadRequestError as e:
+        if "content_filter" in str(e):
+            filter_info = extract_content_filter_details(e)
+            ctx.blocked_count += 1
+            update_risk_score(ctx, "prompt_blocked_by_content_filter")
+            log_event("prompt_blocked_by_content_filter", ctx, {
+                "filter_summary": filter_info["filter_summary"],
+                "risk_score_after": ctx.risk_score,
+                "session_risk_after": ctx.session_risk,
+            }, layer="LAYER_3_OPENAI")
+            messages.pop()
+            message = "[Blocked by content policy]"
+            print(f"Assistant: {message}\n")
+            result["status"] = "blocked"
+            result["blocked_by"] = "LAYER_3_OPENAI"
+            result["assistant_response"] = message
+            result["filter_summary"] = filter_info["filter_summary"]
+            result["filter_details"] = filter_info["content_filter_result"]
+            result["risk_score_after"] = round(ctx.risk_score, 3)
+            result["session_risk_after"] = ctx.session_risk
+            result["terminated"] = check_terminate(ctx) if enforce_termination else False
+            return result
+        raise
+    except (APITimeoutError, APIConnectionError) as e:
+        log_event("openai_connection_error", ctx, {"error": str(e)}, layer="LAYER_3_OPENAI")
+        messages.pop()
+        message = "[Connection error — please try again]"
+        print(f"Assistant: {message}\n")
+        result["status"] = "error"
+        result["blocked_by"] = "LAYER_3_OPENAI"
+        result["assistant_response"] = message
+        result["error"] = str(e)
+        result["risk_score_after"] = round(ctx.risk_score, 3)
+        result["session_risk_after"] = ctx.session_risk
+        result["terminated"] = False
+        return result
+
+    answer = resp.choices[0].message.content
+    messages.append({"role": "assistant", "content": answer})
+    log_event("assistant_replied", ctx, {
+        "len": len(answer),
+        "turn": ctx.turn_count,
+    }, layer="LAYER_3_OPENAI")
+    print(f"Assistant: {answer}\n")
+
+    result["assistant_response"] = answer
+    result["risk_score_after"] = round(ctx.risk_score, 3)
+    result["session_risk_after"] = ctx.session_risk
+    result["terminated"] = False
+    return result
+
+
+def run_test_prompts(
+    ctx: SecurityContext,
+    client: AzureOpenAI,
+    deployment: str,
+    messages: list[dict],
+    app_layer_enabled: bool
+) -> None:
+    prompts_path = os.getenv("TEST_PROMPTS_FILE", "test_prompts.json")
+    results_path = os.getenv("TEST_RESULTS_FILE", "results.json")
+    delay_seconds = int(os.getenv("TEST_PROMPT_DELAY_SECONDS", "5"))
+
+    with open(prompts_path, "r", encoding="utf-8") as f:
+        prompts = json.load(f)
+
+    results = []
+    total = len(prompts)
+    print(f"Running {total} test prompts from {prompts_path}.\n")
+
+    for index, item in enumerate(prompts, start=1):
+        prompt_index = item.get("prompt_index", str(index - 1))
+        prompt_text = item.get("prompt", "")
+        expected_result = item.get("expected_result")
+
+        print(f"[{index}/{total}] Prompt {prompt_index}")
+        print(f"You: {prompt_text}")
+
+        outcome = process_user_text(
+            prompt_text,
+            ctx,
+            client,
+            deployment,
+            messages,
+            enforce_termination=False,
+            app_layer_enabled=app_layer_enabled,
+        )
+        outcome["prompt_index"] = prompt_index
+        outcome["expected_result"] = expected_result
+        outcome["timestamp"] = utc_now()
+        results.append(outcome)
+
+        if index < total:
+            time.sleep(delay_seconds)
+
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    print(f"Saved {len(results)} results to {results_path}.\n")
+
+
 # -----------------------------
 # Main loop
 # -----------------------------
@@ -306,12 +599,12 @@ def main() -> None:
     deployment = require_env("AZURE_OPENAI_DEPLOYMENT")
     endpoint = require_env("AZURE_OPENAI_ENDPOINT")
     api_version = os.getenv("OPENAI_API_VERSION", "2025-04-01-preview")
+    app_layer_enabled = parse_bool_flag("app-layer", default=True)
 
     # Single shared credential instance — reused across OpenAI and Content Safety
     credential = DefaultAzureCredential()
 
     # In production: populate SecurityContext from Entra ID JWT token claims
-    # ctx = build_context_from_token(request.headers["Authorization"])
     ctx = SecurityContext(
         tenant_id=os.getenv("TENANT_ID", "security-tenant-demo"),
         user_id=os.getenv("USER_ID", "demo@example.com"),
@@ -333,12 +626,24 @@ def main() -> None:
         "endpoint": endpoint,
         "api_version": api_version,
         "initial_risk_score": ctx.risk_score,
+        "app_layer_enabled": app_layer_enabled,
     }, layer="APP_INIT")
+
+    if "--batch" in sys.argv or os.getenv("RUN_TEST_PROMPTS", "false").lower() == "true":
+        run_test_prompts(ctx, client, deployment, messages, app_layer_enabled)
+        log_event("session_ended", ctx, {
+            "final_risk_score": ctx.risk_score,
+            "total_turns": ctx.turn_count,
+            "total_blocks": ctx.blocked_count,
+            "jailbreak_attempts": ctx.jailbreak_attempts,
+        }, layer="APP_CLEANUP")
+        return
 
     print("Type your message. Type /quit to exit.\n")
 
     while True:
         user_text = input("You: ").strip()
+
         if not user_text:
             continue
 
@@ -351,86 +656,16 @@ def main() -> None:
             }, layer="APP_CLEANUP")
             break
 
-        ctx.turn_count += 1
-
-        # --- Layer 1: App-side policy gate (SecurityContext-aware) ---
-        blocked = apply_security_policy(user_text, ctx)
-        if blocked:
-            ctx.blocked_count += 1
-            update_risk_score(ctx, "prompt_blocked_by_policy")
-            log_event("prompt_blocked_by_policy", ctx, {
-                "reason": blocked,
-                "risk_score_after": ctx.risk_score,
-            }, layer="LAYER_1_APP_POLICY")
-            print(f"Assistant: {blocked}\n")
-            if check_terminate(ctx):
-                break
-            continue
-
-        # --- Layer 1.5: Prompt Shields REST API (logs jailbreaks to MDC) ---
-        shield_block = shield_prompt(user_text, ctx, credential)
-        if shield_block:
-            ctx.blocked_count += 1
-            print(f"Assistant: {shield_block}\n")
-            if check_terminate(ctx):
-                break
-            continue
-
-        # --- Layer 2: Behavioral pattern detection (cross-turn) ---
-        pattern_block = detect_behavioral_pattern(ctx, messages)
-        if pattern_block:
-            ctx.blocked_count += 1
-            log_event("behavioral_pattern_blocked", ctx, {
-                "pattern": pattern_block,
-                "risk_score_after": ctx.risk_score,
-            }, layer="LAYER_2_BEHAVIORAL")
-            print("Assistant: [Suspicious pattern detected. Session flagged.]\n")
-
-        messages.append({"role": "user", "content": user_text})
-        log_event("prompt_sent", ctx, {
-            "len": len(user_text),
-            "current_risk_score": ctx.risk_score,
-            "session_risk": ctx.session_risk,
-        }, layer="LAYER_3_OPENAI")
-
-        # --- Layer 3: Azure OpenAI + Content Filter ---
-        try:
-            resp = client.chat.completions.create(
-                model=deployment,
-                messages=messages,
-                temperature=1,
-            )
-
-        except BadRequestError as e:
-            if "content_filter" in str(e):
-                ctx.blocked_count += 1
-                update_risk_score(ctx, "prompt_blocked_by_content_filter")
-                log_event("prompt_blocked_by_content_filter", ctx, {
-                    "risk_score_after": ctx.risk_score,
-                    "session_risk_after": ctx.session_risk,
-                }, layer="LAYER_3_OPENAI")
-                messages.pop()  # remove blocked message from history
-                print("Assistant: [Blocked by content policy]\n")
-                if check_terminate(ctx):
-                    break
-            else:
-                raise
-            continue
-
-        except (APITimeoutError, APIConnectionError) as e:
-            log_event("openai_connection_error", ctx, {"error": str(e)}, layer="LAYER_3_OPENAI")
-            messages.pop()
-            print("Assistant: [Connection error — please try again]\n")
-            continue
-
-        answer = resp.choices[0].message.content
-        messages.append({"role": "assistant", "content": answer})
-        log_event("assistant_replied", ctx, {
-            "len": len(answer),
-            "turn": ctx.turn_count,
-        }, layer="LAYER_3_OPENAI")
-
-        print(f"Assistant: {answer}\n")
+        outcome = process_user_text(
+            user_text,
+            ctx,
+            client,
+            deployment,
+            messages,
+            app_layer_enabled=app_layer_enabled,
+        )
+        if outcome.get("terminated"):
+            break
 
 
 if __name__ == "__main__":
