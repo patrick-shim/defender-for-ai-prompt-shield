@@ -100,10 +100,10 @@ def extract_content_filter_details(error: Exception) -> dict:
 
 def map_layer_label(layer: Optional[str]) -> str:
     layer_map = {
-        "LAYER_1_APP_POLICY": "app",
-        "LAYER_1.5_AI_FOUNDRY_SAFETY": "azure_ai",
-        "LAYER_2_BEHAVIORAL": "app",
-        "LAYER_3_OPENAI": "azure_openai",
+        "LAYER_1_APP_POLICY": "application_level_policy",
+        "LAYER_1.5_AI_FOUNDRY_SAFETY": "azure_precheck",
+        "LAYER_2_BEHAVIORAL": "application_level_policy",
+        "LAYER_3_OPENAI": "azure_openai_filter",
     }
     return layer_map.get(layer, "unknown")
 
@@ -128,16 +128,11 @@ def build_compact_result(outcome: dict) -> dict:
     else:
         reason = "Allowed"
 
-    confidence = outcome.get("confidence")
-    if confidence is None:
-        confidence = outcome.get("risk_score_after", 0.0)
-
     return {
         "prompt_id": outcome.get("prompt_index"),
         "result": "blocked" if outcome.get("status") == "blocked" else "allowed",
         "layer": map_layer_label(layer),
         "reason": reason,
-        "confidence": round(float(confidence), 2),
     }
 
 
