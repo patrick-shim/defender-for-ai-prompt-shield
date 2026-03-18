@@ -97,8 +97,8 @@ App-controlled checks such as:
 
 This layer is **optional** and can be disabled with `--app-layer=false`.
 
-#### `LAYER_1.5_AI_FOUNDRY_SAFETY` `[AZURE]`
-A lightweight Azure AI Foundry / Azure OpenAI pre-check.
+#### `LAYER_1.5_AZURE_OPENAI_PRECHECK` `[AZURE]`
+A lightweight Azure OpenAI pre-check.
 
 Behavior:
 
@@ -207,8 +207,8 @@ Each result includes fields such as:
 ### Meaning of `blocked_by`
 
 - `LAYER_1_APP_POLICY` = blocked by app rule
-- `LAYER_1.5_AI_FOUNDRY_SAFETY` = blocked by Azure pre-check
-- `LAYER_3_OPENAI` = blocked by Azure OpenAI content filter during main model call
+- `LAYER_1.5_AZURE_OPENAI_PRECHECK` = blocked during an app-issued "precheck" request to Azure OpenAI (same deployment endpoint/content filter policy; not a separate Azure stage)
+- `LAYER_3_OPENAI` = blocked during the main Azure OpenAI model call (same deployment endpoint/content filter policy)
 - `null` with `status = completed` = request was answered successfully or safely refused by the model
 
 ## Requirements
@@ -260,7 +260,7 @@ Possible outcomes:
 
 This is why some prompts show:
 
-- `blocked_by = LAYER_1.5_AI_FOUNDRY_SAFETY`
+- `blocked_by = LAYER_1.5_AZURE_OPENAI_PRECHECK`
 - `blocked_by = LAYER_3_OPENAI`
 - or `status = completed` with a safe refusal response
 

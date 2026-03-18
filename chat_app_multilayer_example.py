@@ -101,7 +101,7 @@ def extract_content_filter_details(error: Exception) -> dict:
 def map_layer_label(layer: Optional[str]) -> str:
     layer_map = {
         "LAYER_1_APP_POLICY": "application_level_policy",
-        "LAYER_1.5_AI_FOUNDRY_SAFETY": "azure_precheck",
+        "LAYER_1.5_AZURE_OPENAI_PRECHECK": "azure_precheck",
         "LAYER_2_BEHAVIORAL": "application_level_policy",
         "LAYER_3_OPENAI": "azure_openai_filter",
     }
@@ -163,7 +163,7 @@ def log_event(event: str, ctx: SecurityContext, details: dict, layer: str = None
         "APP_CLEANUP": "APP",
         "APP_TERMINATION": "APP",
         "LAYER_1_APP_POLICY": "APP",
-        "LAYER_1.5_AI_FOUNDRY_SAFETY": "AZURE",
+        "LAYER_1.5_AZURE_OPENAI_PRECHECK": "AZURE",
         "LAYER_2_BEHAVIORAL": "APP",
         "LAYER_3_OPENAI": "MODEL",
     }
@@ -302,7 +302,7 @@ def analyze_with_ai_foundry_filters(
 
         log_event("ai_foundry_content_analyzed", ctx, {
             "text_length": len(user_text)
-        }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+        }, layer="LAYER_1.5_AZURE_OPENAI_PRECHECK")
 
         return {"result": "ALLOWED", "safe": True}
         
@@ -314,7 +314,7 @@ def analyze_with_ai_foundry_filters(
                 "filter_summary": filter_info["filter_summary"],
                 "filter_reason": str(e),
                 "text_length": len(user_text)
-            }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+            }, layer="LAYER_1.5_AZURE_OPENAI_PRECHECK")
             return {
                 "result": "BLOCKED",
                 "safe": False,
@@ -325,7 +325,7 @@ def analyze_with_ai_foundry_filters(
         else:
             raise
     except Exception as e:
-        log_event("ai_foundry_safety_error", ctx, {"error": str(e)}, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+        log_event("ai_foundry_safety_error", ctx, {"error": str(e)}, layer="LAYER_1.5_AZURE_OPENAI_PRECHECK")
         return None
 
 
@@ -479,23 +479,23 @@ def process_user_text(
         ctx.blocked_count += 1
         update_risk_score(ctx, "high_severity_content")
         if safety_analysis["result"] == "BLOCKED":
-            log_event("ai_foundry_content_blocked", ctx, {
+            log_event("ai_foundry_blocked_content", ctx, {
                 "filter_summary": safety_analysis.get("filter_summary", []),
                 "reason": safety_analysis.get("reason", "Content filter triggered"),
                 "risk_score_after": ctx.risk_score,
-            }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+            }, layer="LAYER_1.5_AZURE_OPENAI_PRECHECK")
             message = "[Content blocked by AI Foundry safety filters]"
             print(f"Assistant: {message}\n")
-            result["blocked_by"] = "LAYER_1.5_AI_FOUNDRY_SAFETY"
+            result["blocked_by"] = "LAYER_1.5_AZURE_OPENAI_PRECHECK"
         
         else:
             log_event("ai_foundry_unsafe_content", ctx, {
                 "analysis_result": safety_analysis["result"],
                 "risk_score_after": ctx.risk_score,
-            }, layer="LAYER_1.5_AI_FOUNDRY_SAFETY")
+            }, layer="LAYER_1.5_AZURE_OPENAI_PRECHECK")
             message = "[Content flagged as potentially unsafe]"
             print(f"Assistant: {message}\n")
-            result["blocked_by"] = "LAYER_1.5_AI_FOUNDRY_SAFETY"
+            result["blocked_by"] = "LAYER_1.5_AZURE_OPENAI_PRECHECK"
         result["status"] = "blocked"
         result["assistant_response"] = message
         result["filter_summary"] = safety_analysis.get("filter_summary", [])
