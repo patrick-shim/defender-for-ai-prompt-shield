@@ -1,6 +1,12 @@
 # Defender for AI Prompt Shield Demo
 
-This project demonstrates how to exercise **Azure AI Foundry / Azure OpenAI safety controls** and inspect the resulting behavior in both the console and `results.json`.
+This project demonstrates how to exercise **Azure AI Foundry / Azure OpenAI safety controls** (including Prompt Shields) and compare behavior across:
+
+- Azure OpenAI with Prompt Shields **Annotate + Block**
+- Azure OpenAI with Prompt Shields **Annotate only**
+- Anthropic Claude (in-band refusals)
+
+It focuses on capturing each provider's most **native** response or error payloads and then deriving a consistent decision label for analysis.
 
 The current code is intentionally optimized for **demo clarity**:
 
@@ -10,16 +16,63 @@ The current code is intentionally optimized for **demo clarity**:
 - optional app-side controls that can be turned on or off
 - batch prompt execution for validation runs
 
-## What the app does
+## Quick start
 
-`chat_app.py` is a console app that sends prompts through a layered pipeline and logs which layer handled or blocked the request.
+1) Create a `.env` file locally by copying `.env.sample`.
 
-It supports two main demo modes:
+2) Run one mode at a time (batch example):
 
-- **Interactive mode** for ad hoc testing
-- **Batch mode** for replaying `test_prompts.json` and writing structured output to `results.json`
+```powershell
+python .\single_chat_app.py --azure-default --batch
+python .\single_chat_app.py --azure-permissive --batch
+python .\single_chat_app.py --claude --batch
+```
 
-## Current architecture
+3) Summarize and compare results:
+
+```powershell
+python .\analyze_results.py
+```
+
+## Main entrypoints
+
+### `single_chat_app.py`
+
+Runs a single provider/policy mode and writes a provider-specific result file:
+
+- `--azure-default` -> `result_azure_default.json` (Prompt Shields annotate+block deployment)
+- `--azure-permissive` -> `result_azure_permissive.json` (Prompt Shields annotate-only deployment)
+- `--claude` -> `result_claude.json`
+
+Modes:
+
+- Interactive: omit `--batch`
+- Batch: include `--batch` (reads `test_prompts.json` by default)
+
+Each row includes:
+
+- `status` (`ok` / `blocked` / `error`)
+- `blocked` (transport/policy hard block)
+- `refusal` (heuristic based on assistant text when available)
+- `derived` (`allow` / `soft_refuse` / `hard_block` / `error`)
+- `native` (best-effort native response/error payload)
+
+### `analyze_results.py`
+
+Loads `result_azure_default.json`, `result_azure_permissive.json`, and `result_claude.json`, aligns by `prompt_index`, and prints:
+
+- Counts by `derived`
+- Pairwise agreement matrices
+- Mismatch lists with short text snippets
+
+No output files are written.
+
+## Optional: multilayer demo app
+
+`chat_app_multilayer_example.py` is a legacy/demo console app that implements an application-layer pipeline (risk scoring, multi-layer gating) and writes to:
+
+- `results.json`
+- `results_verbose.json`
 
 ```text
 User Prompt
@@ -83,109 +136,43 @@ Possible outcomes:
 
 This is also where the model may safely refuse a prompt even if Azure did not hard-block it earlier.
 
-## Source tags in logs
+## Environment configuration
 
-Console logs include a source marker so you can see where the event originated:
+Create a local `.env` file (not committed). Use `.env.sample` as the template.
 
-- `[APP]`
-- `[AZURE]`
-- `[MODEL]`
-
-Example:
-
-```text
-[LAYER_1.5_AI_FOUNDRY_SAFETY] [AZURE] 🟢 ai_foundry_content_analyzed
-[LAYER_3_OPENAI] [MODEL] 🟢 prompt_sent
-[LAYER_3_OPENAI] [MODEL] 🟢 assistant_replied
-```
-
-## Risk scoring
-
-The app maintains an internal `risk_score` in `SecurityContext`.
-
-This score is **app-evaluated**, not returned by Azure.
-
-Current weights in `chat_app.py`:
-
-| Event | Score |
-|---|---:|
-| `prompt_blocked_by_policy` | `0.10` |
-| `behavioral_pattern_detected` | `0.20` |
-| `prompt_blocked_by_content_filter` | `0.25` |
-| `high_severity_content` | `0.30` |
-| `credential_probe` | `0.30` |
-| `prompt_shield_blocked` | `0.40` |
-
-Current session labels:
-
-| Risk score | Session risk |
-|---|---|
-| `0.00 - 0.34` | `low` |
-| `0.35 - 0.69` | `medium` |
-| `0.70+` | `high` |
-
-In interactive mode, a high-risk session can terminate early.
-
-In batch mode, termination is intentionally not enforced so all prompts can be tested.
-
-## App-layer toggle
-
-The app supports a runtime toggle to simplify demos.
-
-### `--app-layer=true`
-Full behavior:
-
-- Layer 1 enabled
-- Layer 2 enabled
-- Azure pre-check enabled
-- model/content filter enabled
-
-### `--app-layer=false`
-Azure/model-focused demo mode:
-
-- Layer 1 disabled
-- Layer 2 disabled
-- Layer 1.5 Azure safety enabled
-- Layer 3 model/content filter enabled
-
-This is useful when you want to demonstrate **Defender for AI / Azure AI Foundry capabilities** without app-side methodology affecting the narrative.
-
-You can also use environment variable fallback:
+Key variables used by `single_chat_app.py`:
 
 ```dotenv
-APP_LAYER=true
+AZURE_OPENAI_ENDPOINT=https://<your-resource>.cognitiveservices.azure.com/
+OPENAI_API_VERSION=2025-01-01-preview
+
+AZURE_OPENAI_DEPLOYMENT_DEFAULT=gpt-5-default
+AZURE_OPENAI_DEPLOYMENT_PERMISSIVE=gpt-5-permissive
+
+AZURE_MAX_TOKENS=512
+AZURE_TEMPERATURE=1
+
+ANTHROPIC_API_KEY=<your-anthropic-api-key>
+ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_MAX_TOKENS=1024
 ```
 
-## Batch testing
+## Output files
 
-Batch mode reads prompts from `test_prompts.json`, submits them one at a time, waits between prompts, and writes results to `results.json`.
+`single_chat_app.py` writes:
 
-### Run batch mode
+- `result_azure_default.json`
+- `result_azure_permissive.json`
+- `result_claude.json`
 
-```powershell
-python .\chat_app.py --batch
-```
+`chat_app_multilayer_example.py` writes:
 
-To run without app-side layers:
-
-```powershell
-python .\chat_app.py --batch --app-layer=false
-```
-
-### Batch mode configuration
-
-Optional environment variables:
-
-```dotenv
-RUN_TEST_PROMPTS=false
-TEST_PROMPTS_FILE=test_prompts.json
-TEST_RESULTS_FILE=results.json
-TEST_PROMPT_DELAY_SECONDS=5
-```
+- `results.json`
+- `results_verbose.json`
 
 ## Results file
 
-Batch execution writes `results.json`.
+Batch execution for the multilayer example writes `results.json`.
 
 Each result includes fields such as:
 
@@ -239,53 +226,24 @@ Install the currently used dependencies:
 pip install openai azure-identity python-dotenv requests
 ```
 
-## Environment configuration
+## Running
 
-Create a local `.env` file.
-
-Example:
-
-```dotenv
-AZURE_OPENAI_ENDPOINT=https://<your-resource>.cognitiveservices.azure.com
-OPENAI_API_VERSION=2024-12-01-preview
-AZURE_OPENAI_DEPLOYMENT=<your-deployment-name>
-
-TENANT_ID=test-tenant
-USER_ID=demo-user
-USER_ROLES=AI-Sec,GBB
-AUTH_STRENGTH=MFA
-DATA_CLASSIFICATION=Internal
-
-VERBOSE_LOGGING=false
-APP_LAYER=true
-TEST_PROMPTS_FILE=test_prompts.json
-TEST_RESULTS_FILE=results.json
-TEST_PROMPT_DELAY_SECONDS=5
-```
-
-### Notes
-
-- `AZURE_OPENAI_API_KEY` is printed only as a debug presence check and is not required when using Entra ID auth.
-- `AZURE_CONTENT_SAFETY_ENDPOINT` is no longer part of the active execution path, even if still present in local environment files.
-
-## Running the app
-
-### Interactive mode
+### `single_chat_app.py` interactive
 
 ```powershell
-python .\chat_app.py
+python .\single_chat_app.py --azure-permissive
 ```
 
-### Interactive mode without app-side layers
+### `single_chat_app.py` batch
 
 ```powershell
-python .\chat_app.py --app-layer=false
+python .\single_chat_app.py --azure-default --batch
 ```
 
-### Batch mode without app-side layers
+### Analyze
 
 ```powershell
-python .\chat_app.py --batch --app-layer=false
+python .\analyze_results.py
 ```
 
 ## Current behavior notes
@@ -317,34 +275,20 @@ When Azure returns a content filter block, the app extracts and records the retu
 
 These values come from the Azure error payload.
 
-## Defender / portal review
-
-After running your test prompts, review:
-
-- Microsoft Defender portal: `https://security.microsoft.com`
-- Azure portal: `https://portal.azure.com`
-
-Useful correlation inputs:
-
-- batch run timestamp
-- Azure resource / deployment used
-- prompt timing from `results.json`
-- `correlation_id` from console logs
-
-Keep in mind:
-
-- `risk_score` is app-side only
-- `blocked_by` is app-side only
-- Azure/Defender will have their own native signal representation
-
 ## File overview
 
 ```text
 .
-├── chat_app.py
+├── single_chat_app.py
+├── analyze_results.py
 ├── test_prompts.json
-├── results.json
+├── result_azure_default.json
+├── result_azure_permissive.json
+├── result_claude.json
 ├── .env.sample
+├── chat_app_multilayer_example.py
+├── results.json
+├── results_verbose.json
 └── README.md
 ```
 
@@ -352,7 +296,6 @@ Keep in mind:
 
 - The app still prints `CONTENT_SAFETY_ENDPOINT` at startup if present in the environment, even though the current safety path uses Azure AI Foundry / Azure OpenAI rather than the separate Content Safety REST flow.
 - Some prompts may be blocked at Layer 1.5 in one run and Layer 3 in another depending on request shape and context.
-- `SecurityContext` values are demo-oriented and should be replaced with real identity context in production.
 - `risk_score` is a local app heuristic, not a Microsoft-native risk metric.
 
 ## References
