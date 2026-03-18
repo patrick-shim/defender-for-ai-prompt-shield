@@ -26,6 +26,12 @@ The current code is intentionally optimized for **demo clarity**:
 python .\single_chat_app.py --azure-default --batch
 python .\single_chat_app.py --azure-permissive --batch
 python .\single_chat_app.py --claude --batch
+
+# Optional: limit batch to first N prompts
+python .\single_chat_app.py --azure-default --batch 10
+
+# Optional: override batch input file
+python .\single_chat_app.py --azure-default --batch --prompts-file my_prompts.json
 ```
 
 3) Summarize and compare results:
@@ -155,6 +161,9 @@ AZURE_TEMPERATURE=1
 ANTHROPIC_API_KEY=<your-anthropic-api-key>
 ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_TOKENS=1024
+
+# Batch input configuration
+INPUT_PROMPTS_BATCH=test_prompts.json
 ```
 
 ## Output files

@@ -32,8 +32,13 @@ def write_json(path: str, data: Any) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def load_prompts() -> list[dict[str, Any]]:
-    prompts_path = os.getenv("TEST_PROMPTS_FILE", "test_prompts.json")
+def load_prompts(prompts_path: Optional[str] = None) -> list[dict[str, Any]]:
+    prompts_path = (
+        prompts_path
+        or os.getenv("INPUT_PROMPTS_BATCH")
+        or os.getenv("TEST_PROMPTS_FILE")
+        or "test_prompts.json"
+    )
     with open(prompts_path, "r", encoding="utf-8") as f:
         prompts = json.load(f)
     if not isinstance(prompts, list):
@@ -307,8 +312,10 @@ def derived_decision(status: str, blocked: bool, refusal: Optional[bool]) -> str
     return "error"
 
 
-def run_batch(mode: str) -> None:
-    prompts = load_prompts()
+def run_batch(mode: str, prompts_path: Optional[str], limit: Optional[int]) -> None:
+    prompts = load_prompts(prompts_path=prompts_path)
+    if limit is not None and limit >= 0:
+        prompts = prompts[:limit]
 
     max_tokens = int(os.getenv("COMMON_MAX_TOKENS", os.getenv("AZURE_MAX_TOKENS", "512")))
     temperature = float(os.getenv("COMMON_TEMPERATURE", os.getenv("AZURE_TEMPERATURE", "0.7")))
@@ -462,7 +469,7 @@ def parse_args() -> argparse.Namespace:
             "Required env (Azure default): AZURE_OPENAI_DEPLOYMENT_DEFAULT.\n"
             "Required env (Azure permissive): AZURE_OPENAI_DEPLOYMENT_PERMISSIVE or AZURE_OPENAI_DEPLOYMENT.\n"
             "Required env (Claude): ANTHROPIC_API_KEY.\n"
-            "Optional: TEST_PROMPTS_FILE, COMMON_MAX_TOKENS, COMMON_TEMPERATURE."
+            "Optional: INPUT_PROMPTS_BATCH (or legacy TEST_PROMPTS_FILE), COMMON_MAX_TOKENS, COMMON_TEMPERATURE."
         )
     )
 
@@ -471,7 +478,19 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--azure-default", action="store_true")
     group.add_argument("--azure-permissive", action="store_true")
 
-    parser.add_argument("--batch", action="store_true", help="Run all prompts from TEST_PROMPTS_FILE")
+    parser.add_argument(
+        "--batch",
+        nargs="?",
+        const=-1,
+        type=int,
+        metavar="N",
+        help="Run prompts in batch. Use '--batch' for all prompts, or '--batch N' for the first N prompts.",
+    )
+    parser.add_argument(
+        "--prompts-file",
+        default=None,
+        help="Batch input prompts file. Overrides INPUT_PROMPTS_BATCH / TEST_PROMPTS_FILE.",
+    )
 
     return parser.parse_args()
 
@@ -486,8 +505,12 @@ def main() -> None:
     else:
         mode = "azure_permissive"
 
-    if args.batch or os.getenv("RUN_TEST_PROMPTS", "false").lower() == "true":
-        run_batch(mode)
+    run_batch_env = os.getenv("RUN_TEST_PROMPTS", "false").lower() == "true"
+    if args.batch is not None or run_batch_env:
+        limit = None
+        if isinstance(args.batch, int) and args.batch >= 0:
+            limit = args.batch
+        run_batch(mode, prompts_path=args.prompts_file, limit=limit)
         return
 
     run_interactive(mode)
