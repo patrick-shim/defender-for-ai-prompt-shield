@@ -37,7 +37,7 @@ def load_prompts(prompts_path: Optional[str] = None) -> list[dict[str, Any]]:
         prompts_path
         or os.getenv("INPUT_PROMPTS_BATCH")
         or os.getenv("TEST_PROMPTS_FILE")
-        or "test_prompts.json"
+        or "input_prompts.json"
     )
     with open(prompts_path, "r", encoding="utf-8") as f:
         prompts = json.load(f)

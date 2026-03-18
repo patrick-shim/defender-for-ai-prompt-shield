@@ -53,7 +53,7 @@ Runs a single provider/policy mode and writes a provider-specific result file:
 Modes:
 
 - Interactive: omit `--batch`
-- Batch: include `--batch` (reads `test_prompts.json` by default)
+- Batch: include `--batch` (reads `input_prompts.json` by default)
 
 Each row includes:
 
@@ -163,7 +163,7 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_TOKENS=1024
 
 # Batch input configuration
-INPUT_PROMPTS_BATCH=test_prompts.json
+INPUT_PROMPTS_BATCH=input_prompts.json
 ```
 
 ## Output files
@@ -290,7 +290,7 @@ These values come from the Azure error payload.
 .
 ├── single_chat_app.py
 ├── analyze_results.py
-├── test_prompts.json
+├── input_prompts.json
 ├── result_azure_default.json
 ├── result_azure_permissive.json
 ├── result_claude.json
