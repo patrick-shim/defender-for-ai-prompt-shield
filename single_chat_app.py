@@ -13,6 +13,9 @@ from openai import AzureOpenAI, BadRequestError, APIConnectionError, APITimeoutE
 load_dotenv(override=True)
 
 
+# -----------------------------
+# Shared helpers (provider-agnostic)
+# -----------------------------
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -64,6 +67,9 @@ def is_probable_refusal(text: str) -> bool:
     return any(m in low for m in refusal_markers)
 
 
+# -----------------------------
+# Azure OpenAI / AI Foundry logic
+# -----------------------------
 def extract_content_filter_payload(error: Exception) -> dict:
     text = str(error)
     payload: Optional[dict[str, Any]] = None
@@ -211,6 +217,9 @@ def call_azure(prompt: str, deployment: str, max_tokens: int, temperature: float
         }
 
 
+# -----------------------------
+# Anthropic Claude logic
+# -----------------------------
 def call_claude(prompt: str, max_tokens: int) -> dict:
     api_key = require_env("ANTHROPIC_API_KEY")
     model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
@@ -285,6 +294,9 @@ def call_claude(prompt: str, max_tokens: int) -> dict:
         }
 
 
+# -----------------------------
+# Shared runner logic (batch/interactive)
+# -----------------------------
 def derived_decision(status: str, blocked: bool, refusal: Optional[bool]) -> str:
     if status == "blocked" or blocked is True:
         return "hard_block"
