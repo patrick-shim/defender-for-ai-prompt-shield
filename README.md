@@ -61,7 +61,26 @@ Each row includes:
 - `blocked` (transport/policy hard block)
 - `refusal` (heuristic based on assistant text when available)
 - `derived` (`allow` / `soft_refuse` / `hard_block` / `error`)
+- `finish_reason` (Azure modes only; why generation stopped)
 - `native` (best-effort native response/error payload)
+
+#### Meaning of `derived` and `finish_reason`
+
+`derived` is an app-level label computed from `status`, `blocked`, and `refusal`:
+
+- `hard_block`: `status == blocked` or `blocked == true`
+- `soft_refuse`: `status == ok` and `refusal == true`
+- `allow`: `status == ok` and not a refusal
+- `error`: any other error path
+
+`finish_reason` is the model/API completion stop reason (Azure response metadata), and is independent from `derived`:
+
+- `stop`: normal completion
+- `length`: max completion token limit reached before natural completion
+- `content_filter`: response generation was interrupted/filtered by safety policy
+- `null`: no completion choice available (commonly request blocked before normal completion metadata)
+
+Because these fields represent different layers, combinations like `derived=allow` with `finish_reason=length` are expected: the request was allowed and returned content, but it ended due to token limit instead of a natural stop.
 
 ### `analyze_results.py`
 
